@@ -1,0 +1,29 @@
+# Example config — copy to config.yaml and fill in your Paperless IDs
+# Or use env vars (see README)
+
+paperless:
+  base_url: "https://paperless.example.com/api"
+
+onecli:
+  gateway: "proxy.example.com:3128"
+  agent_name: "hermes"
+  ca_cert: "/workspace/onecli-ca.pem"
+  # Token comes from ONECLI_TOKEN env var or /workspace/.onecli-agent-token
+
+himalaya:
+  account: ""  # default account used if empty
+
+amazon:
+  correspondent_id: 0    # Set to your Amazon correspondent PK
+  document_type_id: 0     # Set to your Receipt document type PK
+  tags: []                # e.g. [28, 26, 27, 30, 29]
+
+custom_fields:
+  order_total: 3
+  order_number: 4
+  order_date: 5
+  shipping_cost: 6
+  tax_amount: 7
+  item_count: 8
+
+archive_folder: "Hermes-Archive-Order"
