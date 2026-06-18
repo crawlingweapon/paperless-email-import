@@ -21,6 +21,8 @@ class OrderData:
     shipping: Optional[float] = None
     tax: Optional[float] = None
     item_count: Optional[int] = None
+    order_url: Optional[str] = None      # Link to order on merchant site
+    message_id: Optional[str] = None     # Email Message-ID for dedup
     items: list[OrderItem] = field(default_factory=list)
 
     @property

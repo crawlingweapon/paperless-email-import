@@ -20,6 +20,7 @@ def generate_order_pdf(
     tax: float = None,
     items: list[dict] = None,
     source_subject: str = "",
+    order_url: str = "",
 ) -> str:
     """Generate a PDF file and return the path. Items are list of {'name': str, 'qty': int}."""
     pdf = FPDF()
@@ -58,6 +59,13 @@ def generate_order_pdf(
             pdf.cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(3)
+
+    # Order link
+    if order_url:
+        pdf.set_font("Helvetica", "", 9)
+        safe_url = latin_safe(order_url)
+        pdf.cell(0, 5, f"Order Link: {safe_url}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
 
     # Source line
     if source_subject:

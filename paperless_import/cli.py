@@ -139,6 +139,7 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
             tax=order.tax,
             items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
             source_subject=order.subject,
+            order_url=order.order_url or "",
         )
 
         # Build custom fields
@@ -229,6 +230,7 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
             tax=order.tax,
             items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
             source_subject=order.subject,
+            order_url=order.order_url or "",
         )
 
         cfs = {}
