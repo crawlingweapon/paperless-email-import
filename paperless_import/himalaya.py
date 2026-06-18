@@ -19,7 +19,8 @@ def run(args: list[str], quiet: bool = True) -> Optional[str]:
 
 def fetch_message(folder: str, email_id: int) -> Optional[str]:
     """Fetch raw MIME content of an email."""
-    return run(["message", "read", str(email_id), "-f", folder])
+    return run(["message", "read", str(email_id), "-f", folder,
+                "-H", "Date", "-H", "Message-ID", "-H", "Content-Type"])
 
 
 def move_message(email_id: int, source: str, target: str) -> bool:
@@ -38,13 +39,13 @@ def parse_envelope_table(output: str) -> list[dict]:
         if line.startswith("|---") or line.startswith("| ID"):
             continue
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) >= 5:
+        if len(parts) >= 6:  # ID | FLAGS | SUBJECT | FROM | DATE
             try:
                 emails.append({
                     "id": int(parts[1]),
-                    "subject": parts[2],
-                    "from_addr": parts[3],
-                    "date_str": parts[4],
+                    "subject": parts[3],
+                    "from_addr": parts[4],
+                    "date_str": parts[5],
                 })
             except ValueError:
                 pass
@@ -71,15 +72,10 @@ def list_envelopes(
 
 
 def list_all_envelopes(folder: str, query: str = "") -> list[dict]:
-    """Paginate through all matching envelopes."""
-    all_emails = []
-    page = 1
-    while True:
-        batch = list_envelopes(folder, query, page=page)
-        if not batch:
-            break
-        all_emails.extend(batch)
-        if len(batch) < 500:
-            break
-        page += 1
-    return all_emails
+    """Fetch all matching envelopes using a single large page.
+
+    Note: himalaya v1.2.0 pagination is broken when combined with query filters,
+    so we use a single page_size=10000 request instead of pagination.
+    """
+    batch = list_envelopes(folder, query, page=1, page_size=10000)
+    return batch
