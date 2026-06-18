@@ -1,8 +1,10 @@
 """CLI entry point for email -> Paperless import pipeline."""
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
+from email import message_from_string
 
 # Add parent to path for script usage
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -12,7 +14,13 @@ from paperless_import.himalaya import fetch_message, move_message, list_all_enve
 from paperless_import.paperless import PaperlessClient
 from paperless_import.pdf import generate_order_pdf
 from paperless_import.parsers.amazon import AmazonParser
-from email import message_from_string
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 def get_registered_parsers():
@@ -20,8 +28,86 @@ def get_registered_parsers():
     return [AmazonParser()]
 
 
+def init_heuristics(cfg):
+    """Initialize tag classifier and resolver from config. Returns (classifier, resolver) or (None, None)."""
+    h_cfg = cfg.get("tag_heuristics", {})
+    if not h_cfg.get("enabled", False):
+        logger.info("Tag heuristics disabled in config")
+        return None, None
+
+    min_confidence = h_cfg.get("min_confidence", 0.55)
+    auto_create = h_cfg.get("auto_create_tags", True)
+    cat_config = h_cfg.get("categories", {})
+
+    try:
+        from paperless_import.tag_heuristics import SemanticTagClassifier, TagResolver
+
+        classifier = SemanticTagClassifier(min_confidence=min_confidence)
+        resolver = TagResolver(
+            pl_client=None,  # set after PaperlessClient init
+            categories=cat_config,
+            auto_create=auto_create,
+        )
+        logger.info(
+            f"Tag heuristics enabled (min_confidence={min_confidence}, "
+            f"auto_create_tags={auto_create})"
+        )
+        return classifier, resolver
+    except ImportError as e:
+        logger.warning(
+            f"sentence-transformers not available, heuristics disabled: {e}"
+        )
+        return None, None
+    except Exception as e:
+        logger.warning(f"Failed to initialize tag heuristics: {e}")
+        return None, None
+
+
 def resolve_folder(email_id: int, inbox_ids: set) -> str:
     return "INBOX" if email_id in inbox_ids else "[Gmail]/All Mail"
+
+
+def run_classifier(classifier, order):
+    """Run heuristic classification on parsed order data."""
+    if not classifier or not order or not order.items:
+        return
+
+    item_names = [i.name for i in order.items if i.name]
+    if not item_names:
+        return
+
+    try:
+        result = classifier.classify(item_names)
+        if result:
+            order.suggested_tags = list(result.keys())
+            logger.info(
+                f"  Heuristic tags: {order.suggested_tags} (from {len(item_names)} items)"
+            )
+    except Exception as e:
+        logger.warning(f"Classification failed: {e}")
+
+
+def resolve_heuristic_tag_ids(resolver, order):
+    """Resolve suggested tag names to Paperless tag IDs."""
+    if not resolver or not order or not order.suggested_tags:
+        return []
+
+    try:
+        return resolver.resolve(order.suggested_tags)
+    except Exception as e:
+        logger.warning(f"Tag resolution failed: {e}")
+        return []
+
+
+def build_tags(base_tags, heuristic_ids):
+    """Combine base and heuristic tags, deduplicating."""
+    seen = set(base_tags)
+    all_tags = list(base_tags)
+    for tid in heuristic_ids:
+        if tid not in seen:
+            seen.add(tid)
+            all_tags.append(tid)
+    return all_tags
 
 
 def main():
@@ -42,6 +128,12 @@ def main():
         ca_cert=ca_cert,
     )
 
+    # Initialize tag heuristics (handles missing deps gracefully)
+    classifier, resolver = init_heuristics(cfg)
+    # Wire Paperless client into resolver once it's created
+    if resolver is not None:
+        resolver._pl = pl
+
     amazon_cfg = cfg.get("amazon", {})
     cf_cfg = cfg.get("custom_fields", {})
     archive_folder = cfg.get("archive_folder", "Hermes-Archive-Order")
@@ -57,6 +149,7 @@ def main():
     # bulk-amazon
     cmd_bulk = sub.add_parser("bulk-amazon", help="Import all unprocessed Amazon orders")
     cmd_bulk.add_argument("--dry-run", action="store_true", help="Only list what would be imported")
+    cmd_bulk.add_argument("--limit", type=int, default=0, help="Max emails to process (for test runs)")
 
     # list
     cmd_list = sub.add_parser("list", help="Show available parsers and config")
@@ -74,25 +167,26 @@ def main():
         print(f"  Amazon correspondent: {amazon_cfg.get('correspondent_id', 'N/A')}")
         print(f"  Tags: {amazon_cfg.get('tags', [])}")
         print(f"  Archive folder: {archive_folder}")
+        print(f"  Tag heuristics enabled: {classifier is not None}")
         if args.emails:
             print()
-            process_bulk_amazon(pl, parsers, cfg, dry_run=True)
+            process_bulk_amazon(pl, parsers, cfg, classifier, resolver, dry_run=True)
         return
 
     if args.command == "import":
         if not args.email_ids:
             print("Provide --email-ids")
             sys.exit(1)
-        process_emails(args.email_ids, args.folder, pl, parsers, cfg)
+        process_emails(args.email_ids, args.folder, pl, parsers, cfg, classifier, resolver)
 
     elif args.command == "bulk-amazon":
-        process_bulk_amazon(pl, parsers, cfg, dry_run=args.dry_run)
+        process_bulk_amazon(pl, parsers, cfg, classifier, resolver, dry_run=args.dry_run, limit=args.limit)
 
     else:
         parser.print_help()
 
 
-def process_emails(email_ids, folder_override, pl, parsers, cfg):
+def process_emails(email_ids, folder_override, pl, parsers, cfg, classifier=None, resolver=None):
     """Process a list of email IDs."""
     amazon_cfg = cfg.get("amazon", {})
     cf_cfg = cfg.get("custom_fields", {})
@@ -110,7 +204,6 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
         if folder_override:
             folder = folder_override
         else:
-            inbox_check = __import__("paperless_import.himalaya", fromlist=["list_all_envelopes"])
             inbox_ids = {e["id"] for e in list_all_envelopes("INBOX", "from auto-confirm@amazon.com")}
             folder = "INBOX" if eid in inbox_ids else "[Gmail]/All Mail"
 
@@ -119,7 +212,6 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
             print("fetch fail"); continue
 
         # Get subject/date from raw headers
-        from email import message_from_string
         msg = message_from_string(raw)
         subject = msg.get("Subject", "")
         from_addr = msg.get("From", "")
@@ -128,6 +220,11 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
         order = amazon_parser.parse(raw, subject, from_addr, date_str)
         if not order:
             print("parse fail"); continue
+
+        # --- Tag heuristics ---
+        run_classifier(classifier, order)
+        heuristic_ids = resolve_heuristic_tag_ids(resolver, order)
+        all_tags = build_tags(amazon_cfg.get("tags", []), heuristic_ids)
 
         # Generate PDF
         pdf_path = generate_order_pdf(
@@ -158,7 +255,7 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
             title=order.title,
             correspondent_id=amazon_cfg.get("correspondent_id", 0),
             document_type_id=amazon_cfg.get("document_type_id", 0),
-            tags=amazon_cfg.get("tags", []),
+            tags=all_tags,
             created=order.order_date or "",
             custom_fields=cfs,
         )
@@ -175,10 +272,10 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
             print("upload fail")
 
 
-def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
+def process_bulk_amazon(pl, parsers, cfg, classifier=None, resolver=None, dry_run=False, limit=0):
     """Bulk import all unprocessed Amazon orders.
-    
-    Uses Message-ID for dedup (writes state to JSON file) instead of 
+
+    Uses Message-ID for dedup (writes state to JSON file) instead of
     folder-scoped IMAP UIDs (which change when moving between Gmail folders).
     """
     amazon_cfg = cfg.get("amazon", {})
@@ -197,9 +294,9 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
     inbox_emails = list_all_envelopes("INBOX", "from auto-confirm@amazon.com")
     inbox_ids = {e["id"] for e in inbox_emails}
 
-    # We'll dedup by Message-ID, not by UID — so include all envelope IDs
-    # and filter after fetching each email's Message-ID
     candidates = all_emails[:]
+    if limit > 0:
+        candidates = candidates[:limit]
     print(f"  Candidates: {len(candidates)}")
 
     if dry_run:
@@ -233,7 +330,7 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
         msg_id = msg.get("Message-ID", "").strip().strip("<>")
 
         if msg_id and msg_id in processed_msg_ids:
-            print(f"skip (Message-ID already processed)")
+            print("skip (Message-ID already processed)")
             skipped += 1
             continue
 
@@ -243,6 +340,11 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
 
         if msg_id:
             batch_msg_ids.add(msg_id)
+
+        # --- Tag heuristics ---
+        run_classifier(classifier, order)
+        heuristic_ids = resolve_heuristic_tag_ids(resolver, order)
+        all_tags = build_tags(amazon_cfg.get("tags", []), heuristic_ids)
 
         pdf_path = generate_order_pdf(
             merchant=order.merchant,
@@ -270,7 +372,7 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
             title=order.title,
             correspondent_id=amazon_cfg.get("correspondent_id", 0),
             document_type_id=amazon_cfg.get("document_type_id", 0),
-            tags=amazon_cfg.get("tags", []),
+            tags=all_tags,
             created=order.order_date or "",
             custom_fields=cfs,
         )

@@ -1,5 +1,6 @@
 """Paperless-ngx API client with OneCLI proxy support."""
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -7,6 +8,8 @@ from typing import Optional
 import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logger = logging.getLogger(__name__)
 
 
 class PaperlessClient:
@@ -66,3 +69,20 @@ class PaperlessClient:
     def list_correspondents(self) -> list[dict]:
         result = self._get("correspondents/")
         return result.get("results", []) if result else []
+
+    def create_tag(self, tag_data: dict) -> Optional[dict]:
+        """Create a new tag. tag_data: {name, color, is_inbox_tag}. Returns created tag or None."""
+        url = f"{self.base_url}/tags/"
+        try:
+            r = requests.post(
+                url,
+                json=tag_data,
+                proxies=self.proxies,
+                verify=self.verify,
+                timeout=30,
+                headers={"Content-Type": "application/json"},
+            )
+            return r.json() if r.status_code in (200, 201) else None
+        except Exception as e:
+            logger.warning(f"Failed to create tag: {e}")
+            return None

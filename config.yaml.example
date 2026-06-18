@@ -27,3 +27,42 @@ custom_fields:
   item_count: 8
 
 archive_folder: "Hermes-Archive-Order"
+
+# --- Tag Heuristics ---
+# Uses sentence-transformers to semantically classify order item names into
+# categories, adding relevant Paperless tags at import time.
+# Model (~80MB) downloads on first use, cached permanently.
+tag_heuristics:
+  enabled: true
+  min_confidence: 0.06       # TF-IDF produces lower scores than embeddings
+  auto_create_tags: true     # Auto-create Paperless tags for new categories
+  categories:
+    Pets:
+      color: "#e41a1c"
+      tag_id: 0              # 0 = auto-create, or set existing tag ID
+    Home Improvement:
+      color: "#377eb8"
+    Electronics & Tech:
+      color: "#4daf4a"
+    Kitchen & Dining:
+      color: "#984ea3"
+    Automotive:
+      color: "#ff7f00"
+    Health & Beauty:
+      color: "#ffff33"
+    Office & Stationery:
+      color: "#a65628"
+    Garden & Outdoor:
+      color: "#f781bf"
+    Books & Media:
+      color: "#999999"
+    Clothing & Accessories:
+      color: "#e7298a"
+    Baby & Kids:
+      color: "#66c2a5"
+    Sports & Fitness:
+      color: "#fc8d62"
+    Arts & Crafts:
+      color: "#8da0cb"
+    Groceries & Food:
+      color: "#e78ac3"

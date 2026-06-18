@@ -24,6 +24,7 @@ class OrderData:
     order_url: Optional[str] = None      # Link to order on merchant site
     message_id: Optional[str] = None     # Email Message-ID for dedup
     items: list[OrderItem] = field(default_factory=list)
+    suggested_tags: list[str] = field(default_factory=list)  # Heuristic category names
 
     @property
     def pdf_title(self) -> str:
