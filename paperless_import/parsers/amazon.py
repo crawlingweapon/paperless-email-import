@@ -115,6 +115,16 @@ class AmazonParser(BaseParser):
         return msg.get("Message-ID", "").strip().strip("<>")
 
     @staticmethod
+    def is_summary_only(body: str) -> bool:
+        """Check if body is a summary-only email (no item details in plain text).
+
+        These emails have totals but no individual item names/lines.
+        Detected by presence of 'Total Before Tax' which only appears
+        in this stripped-down Amazon template.
+        """
+        return "Total Before Tax" in body
+
+    @staticmethod
     def _parse_amounts(lines: list[str]) -> tuple:
         """Parse financial lines within a single order section.
 

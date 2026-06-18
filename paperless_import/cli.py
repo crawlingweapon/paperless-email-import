@@ -341,6 +341,15 @@ def process_bulk_amazon(pl, parsers, cfg, classifier=None, resolver=None, dry_ru
         if msg_id:
             batch_msg_ids.add(msg_id)
 
+        # --- Skip summary-only emails (no item details in plain text) ---
+        # These are valid but contain only totals — no items worth archiving.
+        # Mark Message-ID as processed so they're never retried.
+        body_text = amazon_parser._get_body_text(raw)
+        if not order.items and body_text and amazon_parser.is_summary_only(body_text) and order.total is not None:
+            print("skip (summary-only, no items)")
+            skipped += 1
+            continue
+
         # --- Tag heuristics ---
         run_classifier(classifier, order)
         heuristic_ids = resolve_heuristic_tag_ids(resolver, order)
