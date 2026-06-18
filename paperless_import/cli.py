@@ -7,11 +7,12 @@ from pathlib import Path
 # Add parent to path for script usage
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from paperless_import.config import load_config
+from paperless_import.config import load_config, load_state, save_state
 from paperless_import.himalaya import fetch_message, move_message, list_all_envelopes
 from paperless_import.paperless import PaperlessClient
 from paperless_import.pdf import generate_order_pdf
 from paperless_import.parsers.amazon import AmazonParser
+from email import message_from_string
 
 
 def get_registered_parsers():
@@ -175,50 +176,73 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg):
 
 
 def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
-    """Bulk import all unprocessed Amazon orders."""
+    """Bulk import all unprocessed Amazon orders.
+    
+    Uses Message-ID for dedup (writes state to JSON file) instead of 
+    folder-scoped IMAP UIDs (which change when moving between Gmail folders).
+    """
     amazon_cfg = cfg.get("amazon", {})
     archive_folder = cfg.get("archive_folder", "Hermes-Archive-Order")
+    state_file = cfg.get("state_file", os.path.expanduser("~/.paperless-import-state.json"))
+
+    # Load previously processed Message-IDs
+    processed_msg_ids = load_state(state_file)
+    print(f"Previously processed (by Message-ID): {len(processed_msg_ids)}")
 
     print("Discovering Amazon auto-confirm emails...")
     all_emails = list_all_envelopes("[Gmail]/All Mail", "from auto-confirm@amazon.com")
     print(f"  Total in All Mail: {len(all_emails)}")
 
-    archived = list_all_envelopes(archive_folder, "from auto-confirm@amazon.com")
-    archived_ids = {e["id"] for e in archived}
-    print(f"  Already archived: {len(archived_ids)}")
-
     # Inbox IDs for folder routing
     inbox_emails = list_all_envelopes("INBOX", "from auto-confirm@amazon.com")
     inbox_ids = {e["id"] for e in inbox_emails}
 
-    to_process = [e for e in all_emails if e["id"] not in archived_ids]
-    print(f"  To process: {len(to_process)}")
+    # We'll dedup by Message-ID, not by UID — so include all envelope IDs
+    # and filter after fetching each email's Message-ID
+    candidates = all_emails[:]
+    print(f"  Candidates: {len(candidates)}")
 
     if dry_run:
-        for e in to_process[:20]:
+        print(f"\nWould process {len(candidates)} emails (in batches of 100)")
+        for e in candidates[:10]:
             print(f"    ID {e['id']}: {e['subject'][:60]} ({e['date_str']})")
-        if len(to_process) > 20:
-            print(f"    ... and {len(to_process) - 20} more")
+        if len(candidates) > 10:
+            print(f"    ... and {len(candidates) - 10} more")
         return
 
     amazon_parser = next((p for p in parsers if isinstance(p, AmazonParser)), None)
     cf_cfg = cfg.get("custom_fields", {})
     success = 0
     failed = 0
+    skipped = 0
+    new_msg_ids = set()
+    batch_msg_ids = set()
 
-    for i, em in enumerate(to_process, 1):
+    for i, em in enumerate(candidates, 1):
         eid = em["id"]
         folder = resolve_folder(eid, inbox_ids)
 
-        print(f"  [{i}/{len(to_process)}] ID {eid} ...", end=" ", flush=True)
+        print(f"  [{i}/{len(candidates)}] ID {eid} ...", end=" ", flush=True)
 
         raw = fetch_message(folder, eid)
         if not raw:
             print("fetch fail"); failed += 1; continue
 
+        # Extract Message-ID for dedup
+        msg = message_from_string(raw)
+        msg_id = msg.get("Message-ID", "").strip().strip("<>")
+
+        if msg_id and msg_id in processed_msg_ids:
+            print(f"skip (Message-ID already processed)")
+            skipped += 1
+            continue
+
         order = amazon_parser.parse(raw, em["subject"], em["from_addr"], em["date_str"])
         if not order:
             print("parse fail"); failed += 1; continue
+
+        if msg_id:
+            batch_msg_ids.add(msg_id)
 
         pdf_path = generate_order_pdf(
             merchant=order.merchant,
@@ -264,10 +288,18 @@ def process_bulk_amazon(pl, parsers, cfg, dry_run=False):
             print("upload fail")
             failed += 1
 
+        # Save state every 25 to prevent data loss on crash
         if i % 25 == 0:
-            print(f"  --- checkpoint: {i}/{len(to_process)} ({success} ok, {failed} fail) ---")
+            processed_msg_ids.update(batch_msg_ids)
+            save_state(state_file, processed_msg_ids)
+            batch_msg_ids = set()
+            print(f"  --- checkpoint: {i}/{len(candidates)} ({success} ok, {failed} fail, {skipped} skip) ---")
 
-    print(f"\n  Summary: {success} ok, {failed} fail of {len(to_process)}")
+    # Final save
+    processed_msg_ids.update(batch_msg_ids)
+    save_state(state_file, processed_msg_ids)
+    print(f"\n  Summary: {success} ok, {failed} fail, {skipped} skip of {len(candidates)}")
+    print(f"  Total Message-IDs tracked: {len(processed_msg_ids)}")
 
 
 if __name__ == "__main__":
