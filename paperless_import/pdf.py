@@ -53,10 +53,16 @@ def generate_order_pdf(
             name = latin_safe(item.get("name", ""))
             qty = item.get("qty", 1)
             price = item.get("price")
+            item_url = item.get("url", "")
             line = f"  x{qty} {name}"
             if price is not None:
                 line += f" - ${price:.2f}"
             pdf.cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
+            if item_url:
+                safe_url = latin_safe(item_url)
+                pdf.set_font("Helvetica", "", 7)
+                pdf.cell(0, 4, f"    Link: {safe_url[:90]}", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("Helvetica", "", 9)
 
     pdf.ln(3)
 

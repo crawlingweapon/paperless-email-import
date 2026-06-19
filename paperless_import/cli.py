@@ -244,7 +244,7 @@ def process_emails(email_ids, folder_override, pl, parsers, cfg, classifier=None
             total=order.total,
             shipping=order.shipping,
             tax=order.tax,
-            items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
+            items=[{"name": i.name, "qty": i.qty, "price": i.price, "url": i.url} for i in order.items],
             source_subject=order.subject,
             order_url=order.order_url or "",
         )
@@ -372,7 +372,7 @@ def process_bulk_amazon(pl, parsers, cfg, classifier=None, resolver=None, dry_ru
             total=order.total,
             shipping=order.shipping,
             tax=order.tax,
-            items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
+            items=[{"name": i.name, "qty": i.qty, "price": i.price, "url": i.url} for i in order.items],
             source_subject=order.subject,
             order_url=order.order_url or "",
         )
@@ -507,7 +507,7 @@ def process_bulk_homedepot(pl, parsers, cfg, classifier=None, resolver=None, dry
             total=order.total,
             shipping=order.shipping,
             tax=order.tax,
-            items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
+            items=[{"name": i.name, "qty": i.qty, "price": i.price, "url": i.url} for i in order.items],
             source_subject=order.subject,
             order_url=order.order_url or "",
         )

@@ -8,6 +8,7 @@ class OrderItem:
     name: str
     qty: int = 1
     price: Optional[float] = None
+    url: Optional[str] = None  # Per-item URL (product page or tracking)
 
 
 @dataclass

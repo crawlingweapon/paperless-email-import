@@ -90,14 +90,15 @@ class HomeDepotParser(BaseParser):
             from paperless_import.parsers.amazon import _parse_date as fallback_date
             order.order_date = fallback_date(date_str)
 
-        # --- Items ---
+        # --- Items & per-item URLs ---
         # Flattened html2text structure:
-        #   [URL] ITEM_NAME [URL] Store SKU#... Unit Price $X.XX Qty N Item Total $X.XX [Est Arrival...]
-        # Pattern repeats for each item. First item's leading URL may be absent.
+        #   [URL1] ITEM_NAME [URL2] Store SKU#... Unit Price $X.XX Qty N Item Total $X.XX
+        # URL1 = item image/product link (tracking), URL2 = also tracking
+        # We capture URL1 as the item's best available link.
         item_blocks = re.finditer(
-            r"(?:\(https?://[^\)]+\)\s+)?"
+            r"(?:\(https?://([^\s\)]+)\)\s+)?"
             r"([A-Z][A-Za-z0-9\s.,/#()&'\-%:;!?@+]{10,200}?)"
-            r"\s*\(https?://[^\)]+\)\s+"
+            r"\s*\(https?://[^\s\)]+\)\s+"
             r"Store SKU[^$]*"
             r"Unit Price\s*\$?([0-9,]+\.[0-9]{1,2})\s+"
             r"Qty\s+(\d+)\s+"
@@ -107,16 +108,22 @@ class HomeDepotParser(BaseParser):
         )
 
         for block in item_blocks:
-            name = block.group(1).strip()
-            # Clean html2text junk — remove any trailing artifacts
+            item_url = block.group(1).strip() if block.group(1) else None
+            name = block.group(2).strip()
             name = re.sub(r"\s+", " ", name).strip()
             if len(name) < 5:
                 continue
             order.items.append(OrderItem(
                 name=name,
-                qty=int(block.group(3)),
-                price=float(block.group(2).replace(",", "")),
+                qty=int(block.group(4)),
+                price=float(block.group(3).replace(",", "")),
+                url=item_url,
             ))
+
+        # --- Order-level URL (check order status) ---
+        m = re.search(r"check\s*order\s*status.*?(https?://[^\s\)]+)", body, re.I)
+        if m:
+            order.order_url = m.group(1).strip()
 
         # --- Total from item sums ---
         if order.items:
