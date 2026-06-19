@@ -14,6 +14,7 @@ from paperless_import.himalaya import fetch_message, move_message, list_all_enve
 from paperless_import.paperless import PaperlessClient
 from paperless_import.pdf import generate_order_pdf
 from paperless_import.parsers.amazon import AmazonParser
+from paperless_import.parsers.homedepot import HomeDepotParser
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def get_registered_parsers():
     """Return list of available email parsers. Add new parsers here."""
-    return [AmazonParser()]
+    return [AmazonParser(), HomeDepotParser()]
 
 
 def init_heuristics(cfg):
@@ -151,6 +152,11 @@ def main():
     cmd_bulk.add_argument("--dry-run", action="store_true", help="Only list what would be imported")
     cmd_bulk.add_argument("--limit", type=int, default=0, help="Max emails to process (for test runs)")
 
+    # bulk-homedepot
+    cmd_hd = sub.add_parser("bulk-homedepot", help="Import all unprocessed Home Depot orders")
+    cmd_hd.add_argument("--dry-run", action="store_true", help="Only list what would be imported")
+    cmd_hd.add_argument("--limit", type=int, default=0, help="Max emails to process (for test runs)")
+
     # list
     cmd_list = sub.add_parser("list", help="Show available parsers and config")
     cmd_list.add_argument("--emails", action="store_true", help="List unprocessed Amazon orders")
@@ -181,6 +187,9 @@ def main():
 
     elif args.command == "bulk-amazon":
         process_bulk_amazon(pl, parsers, cfg, classifier, resolver, dry_run=args.dry_run, limit=args.limit)
+
+    elif args.command == "bulk-homedepot":
+        process_bulk_homedepot(pl, parsers, cfg, classifier, resolver, dry_run=args.dry_run, limit=args.limit)
 
     else:
         parser.print_help()
@@ -407,6 +416,136 @@ def process_bulk_amazon(pl, parsers, cfg, classifier=None, resolver=None, dry_ru
             print(f"  --- checkpoint: {i}/{len(candidates)} ({success} ok, {failed} fail, {skipped} skip) ---")
 
     # Final save
+    processed_msg_ids.update(batch_msg_ids)
+    save_state(state_file, processed_msg_ids)
+    print(f"\n  Summary: {success} ok, {failed} fail, {skipped} skip of {len(candidates)}")
+    print(f"  Total Message-IDs tracked: {len(processed_msg_ids)}")
+
+
+def process_bulk_homedepot(pl, parsers, cfg, classifier=None, resolver=None, dry_run=False, limit=0):
+    """Bulk import all unprocessed Home Depot orders.
+
+    Uses Message-ID dedup via shared state file.
+    """
+    hd_cfg = cfg.get("homedepot", {})
+    cf_cfg = cfg.get("custom_fields", {})
+    archive_folder = cfg.get("archive_folder", "Hermes-Archive-Order")
+    state_file = cfg.get("state_file", os.path.expanduser("~/.paperless-import-state.json"))
+
+    processed_msg_ids = load_state(state_file)
+    print(f"Previously processed (by Message-ID): {len(processed_msg_ids)}")
+
+    print("Discovering Home Depot order emails...")
+    query = "from homedepot.orders"
+    all_emails = list_all_envelopes("[Gmail]/All Mail", query)
+    print(f"  Total in All Mail: {len(all_emails)}")
+
+    # INBOX overlap
+    inbox_emails = list_all_envelopes("INBOX", query)
+    inbox_ids = {e["id"] for e in inbox_emails}
+
+    candidates = all_emails[:]
+    if limit > 0:
+        candidates = candidates[:limit]
+    print(f"  Candidates: {len(candidates)}")
+
+    if dry_run:
+        print(f"\nWould process {len(candidates)} emails")
+        for e in candidates[:10]:
+            eid, subj = e["id"], e.get("subject", "(no subject)")
+            print(f"    ID {eid}: {subj[:60]}")
+        if len(candidates) > 10:
+            print(f"    ... and {len(candidates) - 10} more")
+        return
+
+    hd_parser = next((p for p in parsers if p.__class__.__name__ == "HomeDepotParser"), None)
+    if not hd_parser:
+        print("Error: HomeDepotParser not registered"); return
+
+    success = failed = skipped = 0
+    batch_msg_ids = set()
+
+    for i, em in enumerate(candidates, 1):
+        eid = em["id"]
+        folder = "INBOX" if eid in inbox_ids else "[Gmail]/All Mail"
+
+        print(f"  [{i}/{len(candidates)}] ID {eid} ...", end=" ", flush=True)
+
+        raw = fetch_message(folder, eid)
+        if not raw:
+            print("fetch fail"); failed += 1; continue
+
+        msg = message_from_string(raw)
+        msg_id = msg.get("Message-ID", "").strip().strip("<>")
+
+        if msg_id and msg_id in processed_msg_ids:
+            print("skip (already processed)")
+            skipped += 1
+            continue
+
+        subject = msg.get("Subject", "") or em.get("subject", "")
+        from_addr = msg.get("From", "") or em.get("from_addr", "")
+        date_str = msg.get("Date", "") or em.get("date_str", "")
+
+        order = hd_parser.parse(raw, subject, from_addr, date_str)
+        if not order:
+            print("parse fail"); failed += 1; continue
+
+        if msg_id:
+            batch_msg_ids.add(msg_id)
+
+        # --- Tag heuristics ---
+        run_classifier(classifier, order)
+        heuristic_ids = resolve_heuristic_tag_ids(resolver, order)
+        all_tags = build_tags(hd_cfg.get("tags", []), heuristic_ids)
+
+        pdf_path = generate_order_pdf(
+            merchant=order.merchant,
+            title=order.pdf_title,
+            order_date=order.order_date or "",
+            order_number=order.order_number or "",
+            total=order.total,
+            shipping=order.shipping,
+            tax=order.tax,
+            items=[{"name": i.name, "qty": i.qty, "price": i.price} for i in order.items],
+            source_subject=order.subject,
+            order_url=order.order_url or "",
+        )
+
+        cfs = {}
+        if order.total is not None:   cfs[str(cf_cfg.get("order_total", 3))] = order.total
+        if order.order_number:        cfs[str(cf_cfg.get("order_number", 4))] = order.order_number
+        if order.order_date:          cfs[str(cf_cfg.get("order_date", 5))] = order.order_date
+        if order.shipping is not None: cfs[str(cf_cfg.get("shipping_cost", 6))] = order.shipping
+        if order.tax is not None:     cfs[str(cf_cfg.get("tax_amount", 7))] = order.tax
+        if order.item_count is not None: cfs[str(cf_cfg.get("item_count", 8))] = order.item_count
+
+        ok = pl.upload_document(
+            pdf_path=pdf_path,
+            title=order.title,
+            correspondent_id=hd_cfg.get("correspondent_id", 0),
+            document_type_id=hd_cfg.get("document_type_id", 0),
+            tags=all_tags,
+            created=order.order_date or "",
+            custom_fields=cfs,
+        )
+
+        os.unlink(pdf_path)
+
+        if ok:
+            move_message(eid, folder, archive_folder)
+            print(order.title[:60])
+            success += 1
+        else:
+            print("upload fail")
+            failed += 1
+
+        if i % 25 == 0:
+            processed_msg_ids.update(batch_msg_ids)
+            save_state(state_file, processed_msg_ids)
+            batch_msg_ids = set()
+            print(f"  --- checkpoint: {i}/{len(candidates)} ({success} ok, {failed} fail, {skipped} skip) ---")
+
     processed_msg_ids.update(batch_msg_ids)
     save_state(state_file, processed_msg_ids)
     print(f"\n  Summary: {success} ok, {failed} fail, {skipped} skip of {len(candidates)}")
